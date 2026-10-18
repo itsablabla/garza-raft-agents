@@ -150,6 +150,117 @@ GROK
   echo "[garza] grok garza-auto config written (permanent key auth)"
 fi
 
+# Garza Managers and Garza Leaders are Manifest-gateway subscription tiers
+# (base URL https://app.manifest.build/v1, model auto). Wire them into every
+# CLI the pod runs so raft agents can select managers/auto or leaders/auto.
+if [ -n "$MANAGERS_API_KEY" ] || [ -n "$LEADERS_API_KEY" ]; then
+  node -e '
+    const fs = require("fs");
+    const mk = process.env.MANAGERS_API_KEY || "";
+    const lk = process.env.LEADERS_API_KEY || "";
+    const BASE = "https://app.manifest.build/v1";
+    const addPi = (providers, id, label, apiKey) => {
+      if (!apiKey) return;
+      providers[id] = {
+        name: label, baseUrl: BASE, api: "openai-completions", apiKey, authHeader: true,
+        models: [{id: "auto", name: label + " Auto", reasoning: true, input: ["text", "image"],
+          cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0},
+          contextWindow: 200000, maxTokens: 64000,
+          compat: {supportsDeveloperRole: true, supportsReasoningEffort: true, maxTokensField: "max_completion_tokens", thinkingFormat: "openai"}}],
+      };
+    };
+    let pi = {providers: {}};
+    try { pi = JSON.parse(fs.readFileSync("/root/.pi/agent/models.json", "utf8")); } catch {}
+    pi.providers = pi.providers || {};
+    addPi(pi.providers, "managers", "Garza Managers", mk);
+    addPi(pi.providers, "leaders", "Garza Leaders", lk);
+    fs.writeFileSync("/root/.pi/agent/models.json", JSON.stringify(pi, null, 2));
+
+    let oc = {"$schema": "https://opencode.ai/config.json", provider: {}};
+    try { oc = JSON.parse(fs.readFileSync("/root/.config/opencode/opencode.json", "utf8")); } catch {}
+    oc.provider = oc.provider || {};
+    const addOc = (id, label, apiKey) => {
+      if (!apiKey) return;
+      oc.provider[id] = {npm: "@ai-sdk/openai-compatible", name: label,
+        options: {baseURL: BASE, apiKey, stream: true},
+        models: {auto: {name: label + " Auto", limit: {context: 200000, output: 128000}, options: {stream: true}}}};
+    };
+    addOc("managers", "Garza Managers", mk);
+    addOc("leaders", "Garza Leaders", lk);
+    fs.writeFileSync("/root/.config/opencode/opencode.json", JSON.stringify(oc, null, 2));
+    console.log("[garza] managers/leaders wired into pi + opencode");
+  ' || true
+
+  # Kimi Code: append providers; create the file first if it is missing.
+  mkdir -p /root/.kimi-code
+  umask 077
+  if [ ! -f /root/.kimi-code/config.toml ]; then
+    if [ -n "$GARZA_AUTO_API_KEY" ]; then DEF=garza/garza-auto
+    elif [ -n "$MANAGERS_API_KEY" ]; then DEF=managers/auto
+    else DEF=leaders/auto
+    fi
+    printf 'default_model = "%s"\ndefault_permission_mode = "yolo"\ntelemetry = false\n' "$DEF" > /root/.kimi-code/config.toml
+  fi
+  if [ -n "$MANAGERS_API_KEY" ]; then
+    cat >> /root/.kimi-code/config.toml <<KIMIM
+[providers.managers]
+type = "openai"
+base_url = "https://app.manifest.build/v1"
+api_key = "$MANAGERS_API_KEY"
+
+[models."managers/auto"]
+provider = "managers"
+model = "auto"
+max_context_size = 200000
+capabilities = ["thinking", "tool_use"]
+display_name = "Garza Managers"
+KIMIM
+  fi
+  if [ -n "$LEADERS_API_KEY" ]; then
+    cat >> /root/.kimi-code/config.toml <<KIMIL
+[providers.leaders]
+type = "openai"
+base_url = "https://app.manifest.build/v1"
+api_key = "$LEADERS_API_KEY"
+
+[models."leaders/auto"]
+provider = "leaders"
+model = "auto"
+max_context_size = 200000
+capabilities = ["thinking", "tool_use"]
+display_name = "Garza Leaders"
+KIMIL
+  fi
+  chmod 600 /root/.kimi-code/config.toml
+
+  # Grok CLI: add selectable Garza Managers / Garza Leaders models.
+  mkdir -p /root/.grok
+  if [ -n "$MANAGERS_API_KEY" ]; then
+    cat >> /root/.grok/config.toml <<GROKM
+[model."grok-managers"]
+model = "auto"
+base_url = "https://app.manifest.build/v1"
+name = "Garza Managers"
+api_key = "$MANAGERS_API_KEY"
+api_backend = "chat_completions"
+context_window = 200000
+GROKM
+  fi
+  if [ -n "$LEADERS_API_KEY" ]; then
+    cat >> /root/.grok/config.toml <<GROKL
+[model."grok-leaders"]
+model = "auto"
+base_url = "https://app.manifest.build/v1"
+name = "Garza Leaders"
+api_key = "$LEADERS_API_KEY"
+api_backend = "chat_completions"
+context_window = 200000
+GROKL
+  fi
+  chmod 600 /root/.grok/config.toml
+  echo "[garza] managers/leaders wired into kimi + grok"
+fi
+
 # Optional: pre-seed a Raft session (base64 JSON) for headless attach
 if [ -n "$RAFT_SESSION_B64" ] && [ ! -f /root/.raft/computer/user-session.json ]; then
   mkdir -p /root/.raft/computer
